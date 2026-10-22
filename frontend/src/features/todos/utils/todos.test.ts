@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { formatDate, isOverdue, selectTodos, validateTodo } from './todos'
+import {
+  formatDate,
+  isOverdue,
+  localIsoDate,
+  selectTodos,
+  validateTodo,
+} from './todos'
 import type { Todo, TodoInput } from '../types'
 
 const base: Todo = {
@@ -147,6 +153,23 @@ describe('isOverdue', () => {
     ],
   ])('handles a task %s', (_, overrides, expected) => {
     expect(isOverdue({ ...base, ...overrides })).toBe(expected)
+  })
+})
+
+describe('localIsoDate', () => {
+  it('formats the given date in local time with zero padding', () => {
+    expect(localIsoDate(new Date(2026, 0, 5, 23, 59))).toBe('2026-01-05')
+    expect(localIsoDate(new Date(2026, 11, 31, 0, 0))).toBe('2026-12-31')
+  })
+
+  it('defaults to the current date', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 15, 12))
+    try {
+      expect(localIsoDate()).toBe('2026-10-15')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

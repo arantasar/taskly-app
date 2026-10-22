@@ -33,6 +33,21 @@ it('creates the task and prepends it to the cached list', async () => {
   expect(client.getQueryData(todoKeys.list)).toEqual([saved, todoFixture])
 })
 
+it('invalidates the stats after a successful creation only', async () => {
+  const { client, wrapper } = createQueryClientWrapper()
+  const invalidate = vi.spyOn(client, 'invalidateQueries')
+  vi.mocked(todosApi.create).mockResolvedValueOnce(todoFixture)
+  const { result } = renderHook(() => useCreateTodoMutation(), { wrapper })
+
+  await act(() => result.current.mutateAsync(input))
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: todoKeys.stats })
+
+  invalidate.mockClear()
+  vi.mocked(todosApi.create).mockRejectedValueOnce(new Error('Server down'))
+  await act(() => result.current.mutateAsync(input).catch(() => undefined))
+  expect(invalidate).not.toHaveBeenCalled()
+})
+
 it('starts the list when nothing is cached yet', async () => {
   const { client, wrapper } = createQueryClientWrapper()
   vi.mocked(todosApi.create).mockResolvedValue(todoFixture)

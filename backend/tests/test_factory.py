@@ -13,6 +13,7 @@ def test_create_app_registers_health_and_todo_routes():
     assert {path: set(methods) for path, methods in paths.items()} == {
         "/api/health": {"get"},
         "/api/todos": {"get", "post"},
+        "/api/todos/stats": {"get"},
         "/api/todos/{todo_id}": {"get", "patch", "delete"},
     }
     assert app.title == "Taskly API"
