@@ -75,7 +75,8 @@ def run_frontend(paths: list[str], coverage: bool, run_dir: Path) -> tuple[int, 
     cmd = ["npx", "vitest", "run", "--reporter=default", "--reporter=junit", f"--outputFile.junit={junit}"]
     cov_dir = run_dir / "frontend-coverage"
     if coverage:
-        cmd += ["--coverage", f"--coverage.reportsDirectory={cov_dir}",
+        # reportOnFailure keeps a baseline measurable when the branch broke tests.
+        cmd += ["--coverage", "--coverage.reportOnFailure", f"--coverage.reportsDirectory={cov_dir}",
                 "--coverage.reporter=json", "--coverage.reporter=json-summary", "--coverage.reporter=text-summary"]
     cmd += paths
     env = {**os.environ, "CI": "1", "FORCE_COLOR": "0"}
