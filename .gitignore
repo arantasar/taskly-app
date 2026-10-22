@@ -12,6 +12,4 @@ htmlcov/
 *.db-wal
 .env
 .DS_Store
-
-assignment 2.md
 .test-results/
