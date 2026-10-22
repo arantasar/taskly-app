@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, it, vi } from 'vitest'
+import { beforeEach, expect, it, vi } from 'vitest'
 import { todoFixture } from '../../../test/todoFixture'
 import { useDeleteTodoMutation } from '../hooks/useDeleteTodoMutation'
 import { DeleteTodoDialog } from './DeleteTodoDialog'
@@ -9,6 +9,76 @@ vi.mock('../../../design-system', () => import('../../../design-system/mocks'))
 vi.mock('../hooks/useDeleteTodoMutation', () => ({
   useDeleteTodoMutation: vi.fn(),
 }))
+beforeEach(() => vi.clearAllMocks())
+
+function mockDelete(overrides: Record<string, unknown> = {}) {
+  const mutation = {
+    isPending: false,
+    error: null,
+    mutateAsync: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  }
+  vi.mocked(useDeleteTodoMutation).mockReturnValue(
+    mutation as unknown as ReturnType<typeof useDeleteTodoMutation>,
+  )
+  return mutation.mutateAsync
+}
+
+it('deletes the task by id and reports success', async () => {
+  const user = userEvent.setup()
+  const mutateAsync = mockDelete()
+  const onDeleted = vi.fn()
+  render(
+    <DeleteTodoDialog
+      todo={todoFixture}
+      busy={false}
+      onClose={vi.fn()}
+      onDeleted={onDeleted}
+    />,
+  )
+  expect(screen.queryByTestId('alert')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Delete task' }))
+  await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1))
+  expect(mutateAsync).toHaveBeenCalledWith(todoFixture.id)
+})
+
+it('stays open without reporting success when deletion fails', async () => {
+  const user = userEvent.setup()
+  const mutateAsync = mockDelete({
+    mutateAsync: vi.fn().mockRejectedValue(new Error('Task not found.')),
+  })
+  const onDeleted = vi.fn()
+  render(
+    <DeleteTodoDialog
+      todo={todoFixture}
+      busy={false}
+      onClose={vi.fn()}
+      onDeleted={onDeleted}
+    />,
+  )
+  await user.click(screen.getByRole('button', { name: 'Delete task' }))
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1))
+  expect(onDeleted).not.toHaveBeenCalled()
+  expect(screen.getByRole('dialog', { name: 'Delete task?' })).toBeVisible()
+})
+
+it.each([
+  ['the page is busy', true, false],
+  ['the deletion is pending', false, true],
+])('disables every action while %s', (_, busy, isPending) => {
+  mockDelete({ isPending })
+  render(
+    <DeleteTodoDialog
+      todo={todoFixture}
+      busy={busy}
+      onClose={vi.fn()}
+      onDeleted={vi.fn()}
+    />,
+  )
+  expect(screen.getByRole('button', { name: 'Deleting…' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled()
+})
 
 it('shows a deletion error and allows cancelling without deleting', async () => {
   const user = userEvent.setup()
