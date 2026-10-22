@@ -28,6 +28,27 @@ it('updates the task and replaces only it in the cached list', async () => {
   expect(client.getQueryData(todoKeys.list)).toEqual([other, saved])
 })
 
+it('invalidates the stats after a successful update only', async () => {
+  const { client, wrapper } = createQueryClientWrapper()
+  const invalidate = vi.spyOn(client, 'invalidateQueries')
+  vi.mocked(todosApi.update).mockResolvedValueOnce(todoFixture)
+  const { result } = renderHook(() => useUpdateTodoMutation(), { wrapper })
+
+  await act(() =>
+    result.current.mutateAsync({ id: 7, input: { completed: true } }),
+  )
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: todoKeys.stats })
+
+  invalidate.mockClear()
+  vi.mocked(todosApi.update).mockRejectedValueOnce(new Error('Not found'))
+  await act(() =>
+    result.current
+      .mutateAsync({ id: 7, input: { completed: true } })
+      .catch(() => undefined),
+  )
+  expect(invalidate).not.toHaveBeenCalled()
+})
+
 it('does not create a list when nothing is cached', async () => {
   const { client, wrapper } = createQueryClientWrapper()
   vi.mocked(todosApi.update).mockResolvedValue(todoFixture)

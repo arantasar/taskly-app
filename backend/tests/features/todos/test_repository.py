@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.features.todos.models import TodoRecord
 from app.features.todos.repository import TodoRepository
-from app.features.todos.schemas import Priority, Todo, TodoCreate, TodoUpdate
+from app.features.todos.schemas import Priority, Todo, TodoCreate, TodoStats, TodoUpdate
 
 
 def test_list_maps_models_and_orders_tasks_newest_first(model_factory, todo_values, todo):
@@ -33,6 +33,19 @@ def test_get_maps_existing_task(model_factory, todo_values, todo):
     session.get.return_value = model_factory(todo_values)
     assert TodoRepository(session).get(7) == todo
     session.get.assert_called_once_with(TodoRecord, 7)
+
+
+def test_stats_derives_active_count_and_queries_overdue_against_given_date():
+    session = Mock(spec=Session)
+    session.execute.return_value.one.return_value = (5, 2, 1)
+    today = date(2026, 10, 15)
+    assert TodoRepository(session).stats(today) == TodoStats(total=5, active=3, completed=2, overdue=1)
+    statement = session.execute.call_args.args[0]
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert today in compiled.params.values()
+    sql = str(compiled)
+    assert "todos.due_date <" in sql
+    assert "FILTER (WHERE todos.completed IS true)" in sql
 
 
 def test_create_persists_payload_with_utc_timestamps_and_returns_refreshed_task():

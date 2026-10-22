@@ -9,6 +9,7 @@ import { TodoList } from './components/TodoList'
 import { TodosHeader } from './components/TodosHeader'
 import { useTodoFilters } from './hooks/useTodoFilters'
 import { useTodosBusy } from './hooks/useTodosBusy'
+import { useTodoStatsQuery } from './hooks/useTodoStatsQuery'
 import { useTodosQuery } from './hooks/useTodosQuery'
 import { useUpdateTodoMutation } from './hooks/useUpdateTodoMutation'
 import { TodosPage } from './TodosPage'
@@ -19,6 +20,7 @@ vi.mock('../../hooks/useNotice', () => ({ useNotice: vi.fn() }))
 vi.mock('./hooks/useTodoFilters', () => ({ useTodoFilters: vi.fn() }))
 vi.mock('./hooks/useTodosBusy', () => ({ useTodosBusy: vi.fn() }))
 vi.mock('./hooks/useTodosQuery', () => ({ useTodosQuery: vi.fn() }))
+vi.mock('./hooks/useTodoStatsQuery', () => ({ useTodoStatsQuery: vi.fn() }))
 vi.mock('./hooks/useUpdateTodoMutation', () => ({
   useUpdateTodoMutation: vi.fn(),
 }))
@@ -50,11 +52,16 @@ function setup({
   query = {},
   mutation = {},
   busy = false,
+  stats = undefined,
 }: {
   query?: Record<string, unknown>
   mutation?: Record<string, unknown>
   busy?: boolean
+  stats?: { overdue: number }
 } = {}) {
+  vi.mocked(useTodoStatsQuery).mockReturnValue({
+    data: stats,
+  } as unknown as ReturnType<typeof useTodoStatsQuery>)
   const todos = [todoFixture]
   const queryResult = {
     data: todos,
@@ -93,7 +100,22 @@ function setup({
   return { notify, mutateAsync: mutationResult.mutateAsync, queryResult }
 }
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(useTodoStatsQuery).mockReturnValue({
+    data: undefined,
+  } as unknown as ReturnType<typeof useTodoStatsQuery>)
+})
+
+it('passes the overdue count from the stats query to the header', () => {
+  setup({ stats: { overdue: 3 } })
+  expect(headerProps().overdue).toBe(3)
+})
+
+it('leaves the overdue count undefined while stats are unavailable', () => {
+  setup()
+  expect(headerProps().overdue).toBeUndefined()
+})
 
 it('displays a query failure and resets mutation errors before retrying', async () => {
   const user = userEvent.setup()
