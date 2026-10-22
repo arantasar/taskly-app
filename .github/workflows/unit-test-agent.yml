@@ -108,12 +108,15 @@ jobs:
           if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          ls -la
 
       - name: Run unit-test agent
         id: agent
         continue-on-error: true
         uses: anthropics/claude-code-action/base-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
         env:
+          # The action installs its own Node (default 18) onto PATH; keep the project's version.
+          NODE_VERSION: "22"
           # Best-effort removal of credentials from the environment of tools the agent runs.
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         with:
@@ -129,6 +132,12 @@ jobs:
             --permission-mode acceptEdits
             --allowedTools "Read" "Grep" "Glob" "Edit" "Write" "Skill" "Bash(python3 .claude/skills/*)" "Bash(git diff *)" "Bash(git status *)" "Bash(git log *)" "Bash(cd *)" "Bash(npx prettier *)" "Bash(npm run typecheck*)" "Bash(ls *)"
 
+      - name: Workspace after the agent (diagnostics)
+        if: always()
+        run: |
+          ls -la
+          git status --porcelain --untracked-files=all
+
       - name: Check that only test files changed
         id: guard
         run: |
@@ -138,9 +147,26 @@ jobs:
             echo "result=failed" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Verify independently of the agent
+      - name: Package agent changes
         if: steps.guard.outputs.result == 'passed'
-        run: python3 .claude/skills/run-tests/scripts/run_tests.py all --coverage --save-as verify || true
+        run: |
+          mkdir -p results
+          git add -A -- backend/tests frontend/src
+          git diff --cached --binary > results/agent.patch
+
+      # A fresh worktree of the PR head plus the patch: nothing the agent left in its
+      # workspace (caches, stray files) can influence the verdict.
+      - name: Verify independently in a clean checkout
+        if: steps.guard.outputs.result == 'passed'
+        run: |
+          verify="$RUNNER_TEMP/verify"
+          git worktree add --detach "$verify" "$HEAD_SHA"
+          if [ -s results/agent.patch ]; then git -C "$verify" apply --index "$PWD/results/agent.patch"; fi
+          ln -s "$PWD/frontend/node_modules" "$verify/frontend/node_modules"
+          (cd "$verify" && python3 .claude/skills/run-tests/scripts/run_tests.py all --coverage --save-as verify) || true
+          cp "$verify/.test-results/verify.json" results/ 2>/dev/null || true
+          mkdir -p results/verify-logs
+          (cd "$verify/.test-results" && find . -name 'output.log' -exec cp --parents {} "$OLDPWD/results/verify-logs/" \;) || true
 
       - name: Export results
         if: always()
@@ -148,17 +174,12 @@ jobs:
           AGENT_OUTCOME: ${{ steps.agent.outputs.conclusion || steps.agent.outcome }}
           GUARD: ${{ steps.guard.outputs.result }}
         run: |
-          mkdir -p results
-          if [ "$GUARD" = "passed" ]; then
-            git add -A -- backend/tests frontend/src
-            git diff --cached --binary > results/agent.patch
-          fi
+          mkdir -p results/agent-logs
           cp .test-results/agent-report.md results/ 2>/dev/null || true
-          cp .test-results/verify.json results/ 2>/dev/null || true
-          # Raw test logs and summaries for debugging (coverage reports excluded).
+          # The agent's own test logs and summaries, for debugging (coverage reports excluded).
           if [ -d .test-results ]; then
             (cd .test-results && find . \( -name '*.log' -o -name '*.json' -o -name '*.xml' \) \
-              -not -path '*coverage*' -exec cp --parents {} ../results/ \;) || true
+              -not -path '*coverage*' -exec cp --parents {} ../results/agent-logs/ \;) || true
           fi
           {
             echo "AGENT_OUTCOME=$AGENT_OUTCOME"
