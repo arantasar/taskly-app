@@ -1,9 +1,10 @@
+from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Response
 
 from ...api.dependencies import Repository
-from .schemas import Todo, TodoCreate, TodoUpdate
+from .schemas import Todo, TodoCreate, TodoStats, TodoUpdate
 
 router = APIRouter(prefix="/api/todos", tags=["todos"])
 TodoId = Annotated[int, Path(gt=0)]
@@ -17,6 +18,13 @@ def list_todos(repo: Repository):
 @router.post("", response_model=Todo, status_code=201)
 def create_todo(payload: TodoCreate, repo: Repository):
     return repo.create(payload)
+
+
+# Declared before /{todo_id}, which would otherwise reject "stats" as an invalid id.
+@router.get("/stats", response_model=TodoStats)
+def todo_stats(repo: Repository, today: Annotated[date | None, Query()] = None):
+    # The client sends its local date so "overdue" matches what the user sees.
+    return repo.stats(today or date.today())
 
 
 @router.get("/{todo_id}", response_model=Todo)
