@@ -1,0 +1,233 @@
+name: Unit test agent
+
+# Creates or updates unit tests for the code changed in a pull request.
+#
+#   generate (read-only, Claude token)  decide whether tests are needed, run the
+#                                        unit-test-engineer agent, verify its patch
+#                                        independently in a clean checkout
+#   publish  (write, no Claude token)   check the patch with the base-branch guard,
+#                                        commit it and upsert one PR comment
+#
+# The job holding the model credential cannot write to the repository, and the job that
+# can write never runs the model or the PR's code.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "backend/**"
+      - "frontend/src/**"
+
+permissions: {}
+
+concurrency:
+  group: unit-test-agent-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  generate:
+    # Same-repository PRs only: fork PRs never receive secrets or a write token.
+    # The bot's commit carries [skip ci]; should a run still appear for it, skip it
+    # (github.actor stays the bot even when someone approves or re-runs it).
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Deterministic and free: when nothing testable changed, no later step runs.
+      - name: Map changed files to tests
+        id: scope
+        run: |
+          mkdir -p results
+          echo '/results/' >> .git/info/exclude
+          python3 .claude/skills/test-scope/scripts/test_scope.py "$BASE_SHA" "$HEAD_SHA" > results/scope.json
+          testable=$(python3 -c "import json; print(json.load(open('results/scope.json'))['summary']['testable'])")
+          echo "testable=$testable" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: steps.scope.outputs.testable != '0'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.scope.outputs.testable != '0'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (locked versions, no install scripts)
+        if: steps.scope.outputs.testable != '0'
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          npm ci --prefix frontend --ignore-scripts --no-audit --no-fund
+
+      # bubblewrap backs CLAUDE_CODE_SUBPROCESS_ENV_SCRUB; Ubuntu 24.04+ blocks unprivileged
+      # user namespaces by default. The sandbox masks a missing package.json with an empty
+      # placeholder, which breaks Vite's config loading, so a real git-excluded root
+      # manifest is created and mounted read-only instead.
+      - name: Prepare the agent sandbox
+        if: steps.scope.outputs.testable != '0'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          echo '{ "private": true }' > package.json
+          echo '/package.json' >> .git/info/exclude
+
+      - name: Run unit-test agent
+        id: agent
+        if: steps.scope.outputs.testable != '0'
+        continue-on-error: true
+        uses: anthropics/claude-code-action/base-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
+        env:
+          # The action installs its own Node (default 18) onto PATH; keep the project's version.
+          NODE_VERSION: "22"
+          # Removes credentials from the environment of everything the agent runs,
+          # including the PR's own code executed by the tests.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PR title/body/comments are deliberately not passed: the agent works from code only.
+          prompt: |
+            Change mode: create or update unit tests for the changes between ${{ github.event.pull_request.base.sha }} and HEAD.
+            Use that exact base commit for test_scope.py and git diff. Follow your workflow and write the report.
+          claude_args: |
+            --agent unit-test-engineer
+            --model ${{ vars.TEST_AGENT_MODEL || 'claude-sonnet-5-5' }}
+            --max-turns 120
+            --permission-mode acceptEdits
+            --allowedTools "Read" "Grep" "Glob" "Edit" "Write" "Skill" "Bash(python3 .claude/skills/*)" "Bash(git diff *)" "Bash(git status *)" "Bash(git log *)" "Bash(cd *)" "Bash(npx prettier *)" "Bash(npm run typecheck*)" "Bash(ls *)"
+
+      # The full diff is exported; whether it may be committed is decided in `publish`.
+      # A fresh worktree of the PR head plus the patch is tested, so nothing the agent left
+      # in its workspace can influence the verdict.
+      - name: Verify the agent's patch in a clean checkout
+        if: steps.scope.outputs.testable != '0'
+        run: |
+          git add -A
+          git diff --cached --binary > results/agent.patch
+          verify="$RUNNER_TEMP/verify"
+          git worktree add --detach "$verify" "$HEAD_SHA"
+          if [ -s results/agent.patch ]; then git -C "$verify" apply --index "$PWD/results/agent.patch"; fi
+          ln -s "$PWD/frontend/node_modules" "$verify/frontend/node_modules"
+          (cd "$verify" && python3 .claude/skills/run-tests/scripts/run_tests.py all --coverage --save-as verify) || true
+          cp -r "$verify/.test-results" results/verify-results || true
+          cp results/verify-results/verify.json results/ || true
+
+      - name: Collect results
+        if: always()
+        env:
+          AGENT_OUTCOME: ${{ steps.agent.outputs.conclusion || steps.agent.outcome }}
+        run: |
+          mkdir -p results
+          cp -r .test-results results/agent-results 2>/dev/null || true
+          cp .test-results/agent-report.md results/ 2>/dev/null || true
+          echo "AGENT_OUTCOME=$AGENT_OUTCOME" > results/status.env
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: agent-results
+          path: |
+            results/
+            !results/**/*coverage*
+          retention-days: 7
+
+  publish:
+    needs: generate
+    if: always() && contains(fromJSON('["success", "failure"]'), needs.generate.result)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Guard and comment scripts come from the base branch, never from the PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            .claude/hooks
+            .github/scripts
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent-results
+          path: artifacts
+
+      # Records one RESULT code for the comment: no-tests-needed, unverified, no-changes,
+      # discarded, branch-moved or committed.
+      - name: Check and commit verified tests
+        working-directory: pr
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          status=../artifacts/status.env
+          {
+            echo "HEAD_SHA=$HEAD_SHA"
+            echo "RUN_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } >> "$status"
+          result() { echo "RESULT=$1" >> "$status"; exit 0; }
+
+          testable=$(python3 -c "import json; print(json.load(open('../artifacts/scope.json'))['summary']['testable'])" || echo unknown)
+          [ "$testable" != "0" ] || result no-tests-needed
+          python3 -c "import json,sys; d=json.load(open('../artifacts/verify.json')); sys.exit(not d or any(v['status'] != 'passed' for v in d.values()))" \
+            || result unverified
+          [ -s ../artifacts/agent.patch ] || result no-changes
+
+          git apply --index ../artifacts/agent.patch
+          python3 ../trusted/.claude/hooks/test_paths_guard.py check || result discarded
+
+          # Only push onto the exact commit that was analysed; a newer push gets its own run.
+          [ "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD_SHA" ] || result branch-moved
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # [skip ci]: GitHub would otherwise create an approval-gated run for this push.
+          git commit -q -m "test: add/update unit tests for ${HEAD_SHA:0:7} [skip ci]" \
+            -m "Generated by the unit-test-engineer agent and verified by the Unit test agent workflow."
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$status"
+          result committed
+
+      - name: Post or update PR comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          python3 trusted/.github/scripts/compose_comment.py artifacts > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- unit-test-agent -->"))) | .id' | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
