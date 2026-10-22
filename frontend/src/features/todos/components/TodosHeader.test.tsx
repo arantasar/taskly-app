@@ -23,3 +23,19 @@ it('invokes creation when enabled and blocks it when disabled', async () => {
   await user.click(button)
   expect(onCreate).toHaveBeenCalledTimes(1)
 })
+
+it.each([
+  ['omitted', undefined],
+  ['zero', 0],
+])('shows no overdue status when the count is %s', (_, overdue) => {
+  render(<TodosHeader disabled={false} overdue={overdue} onCreate={vi.fn()} />)
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
+it.each([
+  [1, '1 overdue task'],
+  [3, '3 overdue tasks'],
+])('announces %i overdue task(s)', (overdue, text) => {
+  render(<TodosHeader disabled={false} overdue={overdue} onCreate={vi.fn()} />)
+  expect(screen.getByRole('status')).toHaveTextContent(text)
+})

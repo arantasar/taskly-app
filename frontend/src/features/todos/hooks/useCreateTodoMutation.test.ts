@@ -33,6 +33,32 @@ it('creates the task and prepends it to the cached list', async () => {
   expect(client.getQueryData(todoKeys.list)).toEqual([saved, todoFixture])
 })
 
+it('marks only the cached stats stale after creating a task', async () => {
+  const { client, wrapper } = createQueryClientWrapper()
+  client.setQueryData<Todo[]>(todoKeys.list, [todoFixture])
+  client.setQueryData(todoKeys.stats, { total: 1 })
+  vi.mocked(todosApi.create).mockResolvedValue(todoFixture)
+  const { result } = renderHook(() => useCreateTodoMutation(), { wrapper })
+  expect(client.getQueryState(todoKeys.stats)?.isInvalidated).toBe(false)
+
+  await act(() => result.current.mutateAsync(input))
+
+  expect(client.getQueryState(todoKeys.stats)?.isInvalidated).toBe(true)
+  expect(client.getQueryState(todoKeys.list)?.isInvalidated).toBe(false)
+})
+
+it('keeps the cached stats fresh when creation fails', async () => {
+  const { client, wrapper } = createQueryClientWrapper()
+  client.setQueryData(todoKeys.stats, { total: 1 })
+  vi.mocked(todosApi.create).mockRejectedValue(new Error('Server down'))
+  const { result } = renderHook(() => useCreateTodoMutation(), { wrapper })
+
+  act(() => result.current.mutate(input))
+
+  await waitFor(() => expect(result.current.isError).toBe(true))
+  expect(client.getQueryState(todoKeys.stats)?.isInvalidated).toBe(false)
+})
+
 it('starts the list when nothing is cached yet', async () => {
   const { client, wrapper } = createQueryClientWrapper()
   vi.mocked(todosApi.create).mockResolvedValue(todoFixture)

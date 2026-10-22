@@ -1,13 +1,13 @@
 from datetime import date, datetime, timezone
 from unittest.mock import Mock
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from app.features.todos.models import TodoRecord
 from app.features.todos.repository import TodoRepository
-from app.features.todos.schemas import Priority, Todo, TodoCreate, TodoUpdate
+from app.features.todos.schemas import Priority, Todo, TodoCreate, TodoStats, TodoUpdate
 
 
 def test_list_maps_models_and_orders_tasks_newest_first(model_factory, todo_values, todo):
@@ -33,6 +33,34 @@ def test_get_maps_existing_task(model_factory, todo_values, todo):
     session.get.return_value = model_factory(todo_values)
     assert TodoRepository(session).get(7) == todo
     session.get.assert_called_once_with(TodoRecord, 7)
+
+
+def test_stats_counts_tasks_in_one_query_and_derives_active():
+    session = Mock(spec=Session)
+    session.execute.return_value.one.return_value = (10, 4, 3)
+    assert TodoRepository(session).stats(date(2026, 10, 22)) == TodoStats(
+        total=10, active=6, completed=4, overdue=3
+    )
+    statement = session.execute.call_args.args[0]
+    expected = select(
+        func.count(TodoRecord.id),
+        func.count(TodoRecord.id).filter(TodoRecord.completed.is_(True)),
+        func.count(TodoRecord.id).filter(
+            and_(TodoRecord.completed.is_(False), TodoRecord.due_date < date(2026, 10, 22))
+        ),
+    )
+    assert statement.compare(expected)
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert date(2026, 10, 22) in compiled.params.values()
+    assert "todos.due_date <" in str(compiled)
+
+
+def test_stats_returns_zeros_for_empty_table():
+    session = Mock(spec=Session)
+    session.execute.return_value.one.return_value = (0, 0, 0)
+    assert TodoRepository(session).stats(date(2026, 10, 22)) == TodoStats(
+        total=0, active=0, completed=0, overdue=0
+    )
 
 
 def test_create_persists_payload_with_utc_timestamps_and_returns_refreshed_task():

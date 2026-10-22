@@ -1,6 +1,10 @@
+from datetime import date
+from unittest.mock import patch
+
 import pytest
 
-from app.features.todos.schemas import TodoCreate, TodoUpdate
+from app.features.todos import router as router_module
+from app.features.todos.schemas import TodoCreate, TodoStats, TodoUpdate
 
 
 def test_list_returns_tasks_from_repository(client, repository_mock, todo):
@@ -30,6 +34,33 @@ def test_create_trims_input_and_returns_created_task(client, repository_mock, to
 def test_invalid_create_never_calls_repository(client, repository_mock, payload):
     assert client.post("/api/todos", json=payload).status_code == 422
     repository_mock.create.assert_not_called()
+
+
+STATS = TodoStats(total=5, active=3, completed=2, overdue=1)
+
+
+def test_stats_uses_client_date_from_query(client, repository_mock):
+    repository_mock.stats.return_value = STATS
+    response = client.get("/api/todos/stats", params={"today": "2026-10-22"})
+    assert response.status_code == 200
+    assert response.json() == {"total": 5, "active": 3, "completed": 2, "overdue": 1}
+    repository_mock.stats.assert_called_once_with(date(2026, 10, 22))
+    repository_mock.get.assert_not_called()
+
+
+def test_stats_defaults_to_server_date_without_query(client, repository_mock):
+    repository_mock.stats.return_value = STATS
+    with patch.object(router_module, "date") as date_mock:
+        date_mock.today.return_value = date(2026, 1, 15)
+        response = client.get("/api/todos/stats")
+    assert response.status_code == 200
+    repository_mock.stats.assert_called_once_with(date(2026, 1, 15))
+
+
+@pytest.mark.parametrize("today", ["2026-02-30", "tomorrow"])
+def test_stats_rejects_invalid_date_before_repository(client, repository_mock, today):
+    assert client.get("/api/todos/stats", params={"today": today}).status_code == 422
+    repository_mock.stats.assert_not_called()
 
 
 def test_get_returns_task_from_repository(client, repository_mock, todo):

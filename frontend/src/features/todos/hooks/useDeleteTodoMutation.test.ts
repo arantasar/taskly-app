@@ -25,6 +25,31 @@ it('deletes the task and removes it from the cached list', async () => {
   expect(client.getQueryData(todoKeys.list)).toEqual([other])
 })
 
+it('marks only the cached stats stale after deleting a task', async () => {
+  const { client, wrapper } = createQueryClientWrapper()
+  client.setQueryData<Todo[]>(todoKeys.list, [todoFixture])
+  client.setQueryData(todoKeys.stats, { total: 1 })
+  vi.mocked(todosApi.remove).mockResolvedValue(undefined)
+  const { result } = renderHook(() => useDeleteTodoMutation(), { wrapper })
+
+  await act(() => result.current.mutateAsync(7))
+
+  expect(client.getQueryState(todoKeys.stats)?.isInvalidated).toBe(true)
+  expect(client.getQueryState(todoKeys.list)?.isInvalidated).toBe(false)
+})
+
+it('keeps the cached stats fresh when deletion fails', async () => {
+  const { client, wrapper } = createQueryClientWrapper()
+  client.setQueryData(todoKeys.stats, { total: 1 })
+  vi.mocked(todosApi.remove).mockRejectedValue(new Error('Task not found.'))
+  const { result } = renderHook(() => useDeleteTodoMutation(), { wrapper })
+
+  act(() => result.current.mutate(7))
+
+  await waitFor(() => expect(result.current.isError).toBe(true))
+  expect(client.getQueryState(todoKeys.stats)?.isInvalidated).toBe(false)
+})
+
 it('does not create a list when nothing is cached', async () => {
   const { client, wrapper } = createQueryClientWrapper()
   vi.mocked(todosApi.remove).mockResolvedValue(undefined)

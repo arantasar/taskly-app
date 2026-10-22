@@ -10,6 +10,7 @@ import { TodosHeader } from './components/TodosHeader'
 import { useTodoFilters } from './hooks/useTodoFilters'
 import { useTodosBusy } from './hooks/useTodosBusy'
 import { useTodosQuery } from './hooks/useTodosQuery'
+import { useTodoStatsQuery } from './hooks/useTodoStatsQuery'
 import { useUpdateTodoMutation } from './hooks/useUpdateTodoMutation'
 import { TodosPage } from './TodosPage'
 import type { Todo } from './types'
@@ -19,6 +20,7 @@ vi.mock('../../hooks/useNotice', () => ({ useNotice: vi.fn() }))
 vi.mock('./hooks/useTodoFilters', () => ({ useTodoFilters: vi.fn() }))
 vi.mock('./hooks/useTodosBusy', () => ({ useTodosBusy: vi.fn() }))
 vi.mock('./hooks/useTodosQuery', () => ({ useTodosQuery: vi.fn() }))
+vi.mock('./hooks/useTodoStatsQuery', () => ({ useTodoStatsQuery: vi.fn() }))
 vi.mock('./hooks/useUpdateTodoMutation', () => ({
   useUpdateTodoMutation: vi.fn(),
 }))
@@ -93,7 +95,26 @@ function setup({
   return { notify, mutateAsync: mutationResult.mutateAsync, queryResult }
 }
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(useTodoStatsQuery).mockReturnValue({
+    data: undefined,
+  } as unknown as ReturnType<typeof useTodoStatsQuery>)
+})
+
+it('passes the overdue count from the stats query to the header', () => {
+  vi.mocked(useTodoStatsQuery).mockReturnValue({
+    data: { total: 5, active: 4, completed: 1, overdue: 2 },
+  } as unknown as ReturnType<typeof useTodoStatsQuery>)
+  setup()
+  expect(headerProps().overdue).toBe(2)
+})
+
+it('leaves the overdue count unset while stats are unavailable', () => {
+  setup()
+  expect(headerProps().overdue).toBeUndefined()
+  expect(listProps().todos).toEqual([todoFixture])
+})
 
 it('displays a query failure and resets mutation errors before retrying', async () => {
   const user = userEvent.setup()
