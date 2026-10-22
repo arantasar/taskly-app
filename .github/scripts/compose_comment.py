@@ -82,6 +82,8 @@ def main() -> int:
     else:
         if guard == "failed":
             outcome = "⛔ **Discarded**: the agent changed files outside the test allowlist. Nothing was committed."
+        elif not verify:
+            outcome = "⚠️ **Not committed**: the independent test run produced no results (see the workflow run)."
         elif not verified:
             outcome = "⚠️ **Not committed**: the independent test run did not pass (see below)."
         elif commit:

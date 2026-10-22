@@ -36,9 +36,12 @@ def python_bin() -> str:
 
 
 def junit_counts(path: Path) -> dict:
-    if not path.exists():
-        return {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed_tests": []}
-    root = ET.parse(path).getroot()
+    empty = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed_tests": []}
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        # The runner crashed before writing results; the exit code and log tell why.
+        return empty | {"failed_tests": ["<no test results: see log_tail>"]}
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     counts = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "failures", "errors", "skipped")}
     failed = []
