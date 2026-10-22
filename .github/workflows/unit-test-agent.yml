@@ -1,0 +1,242 @@
+name: Unit test agent
+
+# Creates or updates unit tests for the code changed in a pull request.
+#
+#   scope    (read-only, no secrets)  decide deterministically whether tests are needed
+#   generate (read-only, Claude token) run the unit-test-engineer agent, verify independently,
+#                                       export the result as a patch artifact
+#   publish  (write, no Claude token)  re-check the patch with the trusted base-branch guard,
+#                                       commit it to the PR branch and upsert one PR comment
+#
+# The job holding the model credential cannot write to the repository, and the job that
+# can write never runs the model or the PR's code.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "backend/**"
+      - "frontend/src/**"
+
+permissions: {}
+
+concurrency:
+  group: unit-test-agent-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  scope:
+    # Same-repository PRs only: fork PRs never receive secrets or a write token.
+    # Commits pushed by this workflow use GITHUB_TOKEN and therefore do not retrigger it.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      testable: ${{ steps.scope.outputs.testable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Map changed files to tests
+        id: scope
+        run: |
+          mkdir -p results
+          python3 .claude/skills/test-scope/scripts/test_scope.py "$BASE_SHA" "$HEAD_SHA" > results/scope.json
+          testable=$(python3 -c "import json; print(json.load(open('results/scope.json'))['summary']['testable'])")
+          echo "testable=$testable" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Test scope"
+            echo '```json'
+            python3 -c "import json; print(json.dumps(json.load(open('results/scope.json'))['summary'], indent=2))"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scope
+          path: results/scope.json
+          retention-days: 7
+
+  generate:
+    needs: scope
+    if: needs.scope.outputs.testable != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (locked versions, no install scripts)
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          npm ci --prefix frontend --ignore-scripts --no-audit --no-fund
+
+      - name: Run unit-test agent
+        id: agent
+        continue-on-error: true
+        uses: anthropics/claude-code-base-action@e8132bc5e637a42c27763fc757faa37e1ee43b34 # v0.0.63
+        env:
+          # Best-effort removal of credentials from the environment of tools the agent runs.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PR title/body/comments are deliberately not passed: the agent works from code only.
+          prompt: |
+            Change mode: create or update unit tests for the changes between ${{ github.event.pull_request.base.sha }} and HEAD.
+            Use that exact base commit for test_scope.py and git diff. Follow your workflow and write the report.
+          claude_args: |
+            --agent unit-test-engineer
+            --model ${{ vars.TEST_AGENT_MODEL || 'claude-opus-5-5' }}
+            --max-turns 150
+            --permission-mode acceptEdits
+            --allowedTools "Read" "Grep" "Glob" "Edit" "Write" "Skill" "Bash(python3 .claude/skills/*)" "Bash(git diff *)" "Bash(git status *)" "Bash(git log *)" "Bash(cd *)" "Bash(npx prettier *)" "Bash(npm run typecheck*)" "Bash(ls *)"
+
+      - name: Check that only test files changed
+        id: guard
+        run: |
+          if python3 .claude/hooks/test_paths_guard.py check; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify independently of the agent
+        if: steps.guard.outputs.result == 'passed'
+        run: python3 .claude/skills/run-tests/scripts/run_tests.py all --coverage --save-as verify || true
+
+      - name: Export results
+        if: always()
+        env:
+          AGENT_OUTCOME: ${{ steps.agent.outputs.conclusion || steps.agent.outcome }}
+          GUARD: ${{ steps.guard.outputs.result }}
+        run: |
+          mkdir -p results
+          if [ "$GUARD" = "passed" ]; then
+            git add -A -- backend/tests frontend/src
+            git diff --cached --binary > results/agent.patch
+          fi
+          cp .test-results/agent-report.md results/ 2>/dev/null || true
+          cp .test-results/verify.json results/ 2>/dev/null || true
+          {
+            echo "AGENT_OUTCOME=$AGENT_OUTCOME"
+            echo "GUARD=${GUARD:-skipped}"
+          } > results/status.env
+          {
+            echo "### Agent report"
+            cat results/agent-report.md 2>/dev/null || echo "_No report._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: agent-results
+          path: results/
+          retention-days: 7
+
+  publish:
+    needs: [scope, generate]
+    if: always() && needs.scope.result == 'success' && needs.generate.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Guard and comment scripts come from the base branch, never from the PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            .claude/hooks
+            .github/scripts
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Apply, re-check and commit verified tests
+        id: commit
+        working-directory: pr
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          status=../artifacts/status.env
+          touch "$status"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$status"
+          echo "RUN_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$status"
+
+          patch=../artifacts/agent.patch
+          if [ ! -s "$patch" ]; then echo "No patch to apply."; exit 0; fi
+          if ! python3 -c "import json,sys; d=json.load(open('../artifacts/verify.json')); sys.exit(any(v['status']!='passed' for v in d.values()))"; then
+            echo "Independent verification did not pass; not committing."; exit 0
+          fi
+
+          git apply --index "$patch"
+          if ! python3 ../trusted/.claude/hooks/test_paths_guard.py check; then
+            sed -i 's/^GUARD=.*/GUARD=failed/' "$status"
+            echo "::error::Patch touches files outside the test allowlist."; exit 0
+          fi
+
+          # Only push onto the exact commit that was analysed; a newer push gets its own run.
+          remote_head=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+          if [ "$remote_head" != "$HEAD_SHA" ]; then
+            echo "Branch moved to $remote_head; skipping commit."; exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "test: add/update unit tests for ${HEAD_SHA:0:7}" \
+            -m "Generated by the unit-test-engineer agent and verified by the Unit test agent workflow."
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$status"
+
+      - name: Post or update PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          python3 trusted/.github/scripts/compose_comment.py artifacts > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- unit-test-agent -->"))) | .id' | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi

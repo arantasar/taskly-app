@@ -5,8 +5,9 @@ Modes:
   test_paths_guard.py hook      PreToolUse hook: reads the tool call JSON on stdin,
                                 exits 2 (blocking) for writes outside the allowlist
                                 and for forbidden Bash commands.
-  test_paths_guard.py check     Post-run check: fails (exit 1) if the working tree
-                                has changes outside the allowlist. Used by CI before
+  test_paths_guard.py check     Post-run check: fails (exit 1) if the working tree of
+                                the repository containing the current directory has
+                                changes outside the allowlist. Used by CI before
                                 anything is committed, independent of the agent.
 """
 
@@ -49,9 +50,9 @@ FORBIDDEN_BASH = [
 ]
 
 
-def root() -> Path:
+def root(prefer_env: bool = True) -> Path:
     project = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project:
+    if prefer_env and project:
         return Path(project).resolve()
     out = subprocess.run(["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True)
     return Path(out.stdout.strip()).resolve()
@@ -96,7 +97,9 @@ def hook() -> int:
 
 
 def check() -> int:
-    base = root()
+    # Always the repository of the working directory: CI runs a trusted copy of
+    # this script against a separate checkout of the pull request.
+    base = root(prefer_env=False)
     out = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=base, check=True, capture_output=True, text=True,
